@@ -6,7 +6,8 @@ import (
 	"net"
 	"sync"
 	"time"
-
+	"fmt"
+	
 	"encoding/json"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/api"
@@ -34,6 +35,10 @@ func NewKubernetesSync(client *etcd.Client) *KubernetesSync {
 	return ks
 }
 
+func buildNameString(service, namespace, domain string) string {
+	return fmt.Sprintf("%s.%s.%s.", service, namespace, domain)
+}
+
 // OnUpdate manages the active set of service records.
 // Active service records get ttl bumps if found in the update set or
 // removed if missing from the update set.
@@ -43,24 +48,27 @@ func (ksync *KubernetesSync) OnUpdate(services []api.Service) {
 		activeServices.Insert(service.Name)
 		info, exists := ksync.getServiceInfo(service.ObjectMeta.Name)
 		serviceIP := net.ParseIP(service.Spec.PortalIP)
+
+		name := buildNameString(service.ObjectMeta.Name, service.ObjectMeta.Namespace, config.Domain)
+
 		if exists && (info.portalPort != service.Spec.Port || !info.portalIP.Equal(serviceIP)) {
-			err := ksync.removeDNS(service.ObjectMeta.Name, info)
+			err := ksync.removeDNS(name, info)
 			if err != nil {
-				log.Printf("failed to remove dns for %q: %s\n", service.ObjectMeta.Name, err)
+				log.Printf("failed to remove dns for %q: %s\n", name, err)
 			}
 		}
-		log.Printf("adding new service %q at %s:%d/%s (local :%d)\n", service.ObjectMeta.Name, serviceIP, service.Spec.Port, service.Spec.Protocol, service.Spec.ProxyPort)
+		log.Printf("adding new service %q at %s:%d/%s (local :%d)\n", name, serviceIP, service.Spec.Port, service.Spec.Protocol, service.Spec.Port)
 		si := &serviceInfo{
-			proxyPort: service.Spec.ProxyPort,
+			Port: service.Spec.Port,
 			protocol:  service.Spec.Protocol,
 			active:    true,
 		}
 		ksync.setServiceInfo(service.ObjectMeta.Name, si)
 		si.portalIP = serviceIP
 		si.portalPort = service.Spec.Port
-		err := ksync.addDNS(service.ObjectMeta.Name, si)
+		err := ksync.addDNS(name, si)
 		if err != nil {
-			log.Println("failed to add dns %q: %s", service.ObjectMeta.Name, err)
+			log.Println("failed to add dns %q: %s", name, err)
 		}
 	}
 	ksync.mu.Lock()
@@ -90,10 +98,9 @@ func (ksync *KubernetesSync) setServiceInfo(service string, info *serviceInfo) {
 }
 
 func (ksync *KubernetesSync) removeDNS(service string, info *serviceInfo) error {
-	record := service + "." + config.Domain
 	// Remove from SkyDNS registration
-	log.Printf("removing %s from DNS", record)
-	_, err := ksync.eclient.Delete(msg.Path(record), true)
+	log.Printf("removing %s from DNS", service)
+	_, err := ksync.eclient.Delete(msg.Path(service), true)
 	return err
 }
 
@@ -107,11 +114,11 @@ func (ksync *KubernetesSync) addDNS(service string, info *serviceInfo) error {
 		Ttl:      30,
 	}
 	b, err := json.Marshal(svc)
-	record := service + "." + config.Domain
+
 	//Set with no TTL, and hope that kubernetes events are accurate.
 
-	log.Printf("setting dns record: %v\n", record)
-	_, err = ksync.eclient.Set(msg.Path(record), string(b), uint64(0))
+	log.Printf("setting dns record: %v\n", service)
+	_, err = ksync.eclient.Set(msg.Path(service), string(b), uint64(0))
 	return err
 }
 
@@ -119,7 +126,7 @@ type serviceInfo struct {
 	portalIP   net.IP
 	portalPort int
 	protocol   api.Protocol
-	proxyPort  int
+	Port  int
 	mu         sync.Mutex // protects active
 	active     bool
 }
